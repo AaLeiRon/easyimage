@@ -40,7 +40,7 @@ Stable Diffusion / DreamShaper
 Generated Images
 
 ## How to start
-git clone https://github.com/YOURNAME/local-ai-workstation
+git clone https://github.com/AaLeiRon/local-ai-workstation
 cd local-ai-workstation
 
 python -m venv .venv
