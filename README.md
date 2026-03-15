@@ -39,6 +39,16 @@ Stable Diffusion / DreamShaper
 ▼
 Generated Images
 
+👨‍💻 Author
+
+Built for experimentation with local AI systems.
+
+📜 License
+
+MIT License
+
+
+
 ## How to start
 git clone https://github.com/AaLeiRon/local-ai-workstation
 cd local-ai-workstation
