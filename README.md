@@ -1,16 +1,56 @@
+# 🤖 Local AI Workstation
 
-# Local AI Workstation v5
+A **local AI workstation** that combines:
 
-Features:
-- Chat UI
-- Image generation via DreamShaper service
-- Image presets (Fast / Balanced / Quality)
-- Gallery view
-- Command system (/image)
+🧠 Local LLM chat  
+🎨 AI image generation  
+📊 Real-time generation progress  
+🖥 Streamlit web interface  
 
-Ports:
-8501 → AI workstation
-8502 → Image generation service
+Everything runs **100% locally on your machine**.
 
-Run:
+---
+
+# ✨ Features
+
+✅ Local Chat Interface  
+✅ Text → Image Generation  
+✅ Image Generation Progress Bar  
+✅ Image Gallery  
+✅ Presets (Fast / Balanced / Quality)  
+✅ Adjustable Generation Parameters  
+✅ Multi-model support  
+✅ LAN access (use from phone / tablet)
+
+---
+
+# 🖥 Architecture
+Browser (Phone / Laptop)
+│
+▼
+Streamlit UI (Port 8501)
+│
+▼
+Image Service API (Port 8502)
+│
+▼
+Stable Diffusion / DreamShaper
+│
+▼
+Generated Images
+
+## How to start
+git clone https://github.com/YOURNAME/local-ai-workstation
+cd local-ai-workstation
+
+python -m venv .venv
+
+.venv\Scripts\activate
+
+pip install -r requirements.txt
+
+Add your model into:
+models/dreamshaper/
+
+run
 python start_services.py
