@@ -1,297 +1,219 @@
 import streamlit as st
 import requests
-from pathlib import Path
-import threading
-import time
+import json
+import base64
 
 IMAGE_SERVICE = "http://127.0.0.1:8502"
+OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 
 st.set_page_config(layout="wide")
-st.title("Local AI Workstation")
+st.title("🧠 Local AI Workstation")
 
-chat_tab, gallery_tab = st.tabs(["Chat", "Gallery"])
-
-# ==================================
-# PRESETS
-# ==================================
-
-PRESETS = {
-    "Fast": {
-        "steps": 6,
-        "guidance": 4.5,
-        "width": 512,
-        "height": 512,
-        "count": 1
-    },
-    "Balanced": {
-        "steps": 10,
-        "guidance": 5.5,
-        "width": 512,
-        "height": 512,
-        "count": 1
-    },
-    "Quality": {
-        "steps": 20,
-        "guidance": 7.0,
-        "width": 768,
-        "height": 768,
-        "count": 1
-    }
-}
-
-# ==================================
+# =========================
 # SIDEBAR
-# ==================================
+# =========================
+
+st.sidebar.title("⚙️ Settings")
 
 mode = st.sidebar.radio(
     "Mode",
-    ["Image Generator", "Chat"]
+    ["Chat", "Text → Image", "Image → Image"]
 )
 
-model = st.sidebar.selectbox(
-    "Image Model",
-    ["dreamshaper"]
+llm_model = st.sidebar.selectbox(
+    "🧠 Language Model",
+    ["qwen3.5:9b", "qwen3-coder:30b", "deepseek-r1:32b"]
 )
 
-preset = st.sidebar.selectbox(
-    "Preset",
-    list(PRESETS.keys())
+image_model = st.sidebar.selectbox(
+    "🎨 Image Model",
+    ["dreamshaper", "juggernaut", "realvis"]
 )
 
-preset_values = PRESETS[preset]
+st.sidebar.markdown("### 🎯 Quality")
 
-st.sidebar.divider()
+steps = st.sidebar.slider("Steps", 1, 60, 25)
+guidance = st.sidebar.slider("Guidance", 1.0, 15.0, 7.0)
+width = st.sidebar.selectbox("Width", [512, 768, 1024], index=1)
+height = st.sidebar.selectbox("Height", [512, 768, 1024], index=1)
+count = st.sidebar.slider("Images", 1, 8, 1)
+strength = st.sidebar.slider("Img2Img Strength", 0.1, 1.0, 0.6)
 
-steps = st.sidebar.slider(
-    "Steps",
-    1,
-    40,
-    preset_values["steps"]
-)
+# =========================
+# HEALTH CHECK
+# =========================
 
-guidance = st.sidebar.slider(
-    "Guidance Scale (CFG)",
-    1.0,
-    15.0,
-    preset_values["guidance"]
-)
+def check_health():
+    try:
+        return requests.get(f"{IMAGE_SERVICE}/health", timeout=1).status_code == 200
+    except:
+        return False
 
-width = st.sidebar.selectbox(
-    "Width",
-    [512, 768, 1024],
-    index=[512, 768, 1024].index(preset_values["width"])
-)
+if check_health():
+    st.sidebar.success("🟢 Image Service Online")
+else:
+    st.sidebar.error("🔴 Image Service Offline")
 
-height = st.sidebar.selectbox(
-    "Height",
-    [512, 768, 1024],
-    index=[512, 768, 1024].index(preset_values["height"])
-)
+# =========================
+# STREAMING CHAT
+# =========================
 
-count = st.sidebar.slider(
-    "Images per prompt",
-    1,
-    4,
-    preset_values["count"]
-)
+def chat_stream(prompt):
+    try:
+        with requests.post(
+            OLLAMA_URL,
+            json={
+                "model": llm_model,
+                "prompt": prompt,
+                "stream": True
+            },
+            stream=True,
+            timeout=300
+        ) as response:
 
-seed = st.sidebar.number_input(
-    "Seed (-1 random)",
-    value=-1
-)
+            for line in response.iter_lines():
+                if line:
+                    try:
+                        data = json.loads(line.decode())
+                        yield data.get("response", "")
+                    except:
+                        continue
+    except Exception as e:
+        yield f"Error: {str(e)}"
 
-# ==================================
-# SERVICE HEALTH
-# ==================================
+# =========================
+# IMAGE CALLS
+# =========================
 
-try:
-
-    r = requests.get(f"{IMAGE_SERVICE}/health", timeout=2)
-
-    if r.status_code == 200:
-        st.sidebar.success("Image Service (8502) Online")
-    else:
-        st.sidebar.warning("Image Service unhealthy")
-
-except:
-    st.sidebar.error("Image Service Offline")
-
-# ==================================
-# FUNCTIONS
-# ==================================
-
-def generate(prompt):
-
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "width": width,
-        "height": height,
-        "steps": steps,
-        "guidance_scale": guidance,
-        "count": count,
-        "seed": seed
-    }
-
-    r = requests.post(
+def txt2img(prompt):
+    return requests.post(
         f"{IMAGE_SERVICE}/generate",
-        json=payload,
+        json={
+            "prompt": prompt,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "guidance_scale": guidance,
+            "count": count,
+            "model": image_model
+        },
         timeout=3600
+    ).json()
+
+def img2img(prompt, file):
+    file.seek(0)
+    encoded = base64.b64encode(file.read()).decode()
+
+    return requests.post(
+        f"{IMAGE_SERVICE}/img2img",
+        json={
+            "prompt": prompt,
+            "image": encoded,
+            "strength": strength,
+            "steps": steps,
+            "guidance_scale": guidance,
+            "count": count,
+            "model": image_model
+        },
+        timeout=3600
+    ).json()
+
+# =========================
+# PROGRESS
+# =========================
+
+def get_progress():
+    try:
+        return requests.get(f"{IMAGE_SERVICE}/progress", timeout=1).json()
+    except:
+        return {"current": 0, "total": 1, "running": False}
+
+# =========================
+# IMAGE UPLOAD (ONLY IN IMG2IMG)
+# =========================
+
+uploaded_file = None
+
+if mode == "Image → Image":
+    st.markdown("### 📤 Upload Image")
+
+    uploaded_file = st.file_uploader(
+        "Drag & drop or click to upload",
+        type=["png", "jpg", "jpeg"]
     )
 
-    if r.status_code != 200:
-        raise Exception(r.text)
+    if uploaded_file:
+        st.image(uploaded_file, caption="Input Image", use_container_width=True)
 
-    return r.json()
+# =========================
+# MAIN INPUT
+# =========================
 
-# ==================================
-# CHAT HISTORY
-# ==================================
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-for m in st.session_state.messages:
-
-    with st.chat_message(m["role"]):
-
-        if m.get("images"):
-
-            for img in m["images"]:
-                st.image(img)
-
-        else:
-            st.write(m["content"])
-
-# ==================================
-# INPUT
-# ==================================
-
-prompt = st.chat_input("Enter prompt")
+prompt = st.chat_input("Type your prompt...")
 
 if prompt:
+    st.chat_message("user").write(prompt)
 
-    st.session_state.messages.append({
-        "role": "user",
-        "content": prompt
-    })
+    # ================= CHAT =================
+    if mode == "Chat":
 
-    with st.chat_message("user"):
-        st.write(prompt)
+        container = st.chat_message("assistant")
+        placeholder = container.empty()
 
-    if mode == "Image Generator":
+        full = ""
+        for token in chat_stream(prompt):
+            full += token
+            placeholder.markdown(full)
 
-        with st.chat_message("assistant"):
+    # ================= TEXT → IMAGE =================
+    elif mode == "Text → Image":
 
-            progress_bar = st.progress(0)
-            status = st.empty()
+        progress_bar = st.progress(0)
+        progress_text = st.empty()
 
-            result_holder = {
-                "result": None,
-                "error": None
-            }
+        result = txt2img(prompt)
 
-            def run_generation():
-
-                try:
-                    result_holder["result"] = generate(prompt)
-                except Exception as e:
-                    result_holder["error"] = str(e)
-
-            thread = threading.Thread(target=run_generation)
-            thread.start()
-
-            while thread.is_alive():
-
-                try:
-
-                    r = requests.get(
-                        f"{IMAGE_SERVICE}/progress",
-                        timeout=1
-                    )
-
-                    data = r.json()
-
-                    if data["running"]:
-
-                        percent = data["current"] / data["total"]
-
-                        progress_bar.progress(percent)
-
-                        status.write(
-                            f"Generating image {data['current']} / {data['total']}"
-                        )
-
-                except:
-                    pass
-
-                time.sleep(0.2)
-
-            thread.join()
-
-            progress_bar.progress(1.0)
-
-            if result_holder["error"]:
-
-                st.error(result_holder["error"])
-                status.write("Generation failed")
-
+        while True:
+            prog = get_progress()
+            if prog["running"]:
+                pct = prog["current"] / prog["total"]
+                progress_bar.progress(pct)
+                progress_text.markdown(
+                    f"**{int(pct*100)}%** ({prog['current']}/{prog['total']})"
+                )
             else:
+                break
 
-                result = result_holder["result"]
-
-                if not result:
-
-                    st.error("Image service returned no result")
-
-                else:
-
-                    urls = result.get("image_urls", [])
-
-                    status.write("Image generation complete")
-
-                    for u in urls:
-                        st.image(u)
-
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "images": urls
-                    })
-
-    else:
-
-        with st.chat_message("assistant"):
-            st.write("LLM integration placeholder")
-
-# ==================================
-# GALLERY
-# ==================================
-
-with gallery_tab:
-
-    st.header("Generated Images")
-
-    ROOT = Path(__file__).resolve().parents[1]
-    img_dir = ROOT / "generated_images"
-
-    if img_dir.exists():
-
-        imgs = sorted(
-            img_dir.glob("*.png"),
-            reverse=True
-        )
-
-        if imgs:
-
-            cols = st.columns(3)
-
-            for i, img in enumerate(imgs):
-
-                with cols[i % 3]:
-                    st.image(str(img))
-
+        if result.get("error"):
+            st.error(result["error"])
         else:
-            st.write("No images yet.")
+            for url in result["image_urls"]:
+                st.image(url)
 
-    else:
-        st.write("generated_images folder not found")
+    # ================= IMAGE → IMAGE =================
+    elif mode == "Image → Image":
+
+        if not uploaded_file:
+            st.warning("Please upload an image first")
+        else:
+            progress_bar = st.progress(0)
+            progress_text = st.empty()
+
+            result = img2img(prompt, uploaded_file)
+
+            while True:
+                prog = get_progress()
+                if prog["running"]:
+                    pct = prog["current"] / prog["total"]
+                    progress_bar.progress(pct)
+                    progress_text.markdown(
+                        f"**{int(pct*100)}%** ({prog['current']}/{prog['total']})"
+                    )
+                else:
+                    break
+
+            if result.get("error"):
+                st.error(result["error"])
+            else:
+                for url in result["image_urls"]:
+                    st.image(url)
