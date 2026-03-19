@@ -1,110 +1,33 @@
 import streamlit as st
 import requests
-import json
-import base64
+import time
+from PIL import Image
 
 IMAGE_SERVICE = "http://127.0.0.1:8502"
-OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 
-st.set_page_config(layout="wide")
-st.title("🧠 Local AI Workstation")
+st.set_page_config(layout="wide", page_title="AI Workstation")
 
 # =========================
-# SIDEBAR
+# STATE
 # =========================
 
-st.sidebar.title("⚙️ Settings")
-
-mode = st.sidebar.radio(
-    "Mode",
-    ["Chat", "Text → Image", "Image → Image"]
-)
-
-llm_model = st.sidebar.selectbox(
-    "🧠 Language Model",
-    ["qwen3.5:9b", "qwen3-coder:30b", "deepseek-r1:32b"]
-)
-
-image_model = st.sidebar.selectbox(
-    "🎨 Image Model",
-    ["dreamshaper", "juggernaut", "realvis", "flux"]
-)
-
-steps = st.sidebar.slider("Steps", 1, 60, 25)
-guidance = st.sidebar.slider("Guidance", 1.0, 15.0, 7.0)
-width = st.sidebar.selectbox("Width", [512, 768, 1024], index=1)
-height = st.sidebar.selectbox("Height", [512, 768, 1024], index=1)
-count = st.sidebar.slider("Images", 1, 8, 1)
-strength = st.sidebar.slider("Img2Img Strength", 0.1, 1.0, 0.6)
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 # =========================
-# HEALTH
+# HELPERS
 # =========================
 
-def check_health():
+def is_image_request(text):
+    t = text.lower()
+    triggers = ["image", "draw", "generate", "picture", "render", "photo"]
+    return any(x in t for x in triggers)
+
+def health():
     try:
         return requests.get(f"{IMAGE_SERVICE}/health").status_code == 200
     except:
         return False
-
-if check_health():
-    st.sidebar.success("🟢 Image Service Online")
-else:
-    st.sidebar.error("🔴 Image Service Offline")
-
-# =========================
-# STREAMING CHAT
-# =========================
-
-def chat_stream(prompt):
-    with requests.post(
-        OLLAMA_URL,
-        json={"model": llm_model, "prompt": prompt, "stream": True},
-        stream=True
-    ) as response:
-        for line in response.iter_lines():
-            if line:
-                data = json.loads(line.decode())
-                yield data.get("response", "")
-
-# =========================
-# IMAGE CALLS
-# =========================
-
-def txt2img(prompt):
-    return requests.post(
-        f"{IMAGE_SERVICE}/generate",
-        json={
-            "prompt": prompt,
-            "width": width,
-            "height": height,
-            "steps": steps,
-            "guidance_scale": guidance,
-            "count": count,
-            "model": image_model
-        }
-    ).json()
-
-def img2img(prompt, file):
-    file.seek(0)
-    encoded = base64.b64encode(file.read()).decode()
-
-    return requests.post(
-        f"{IMAGE_SERVICE}/img2img",
-        json={
-            "prompt": prompt,
-            "image": encoded,
-            "strength": strength,
-            "steps": steps,
-            "guidance_scale": guidance,
-            "count": count,
-            "model": image_model
-        }
-    ).json()
-
-# =========================
-# PROGRESS
-# =========================
 
 def get_progress():
     try:
@@ -112,84 +35,101 @@ def get_progress():
     except:
         return {"current": 0, "total": 1, "running": False}
 
-# =========================
-# IMAGE UPLOAD
-# =========================
-
-uploaded_file = None
-
-if mode == "Image → Image":
-    uploaded_file = st.file_uploader(
-        "📤 Upload image",
-        type=["png", "jpg", "jpeg"]
-    )
-
-    if uploaded_file:
-        st.image(uploaded_file, use_container_width=True)
+def generate_image(prompt, settings):
+    payload = {
+        "prompt": prompt,
+        "model": settings["model"],
+        "steps": settings["steps"],
+        "guidance_scale": settings["guidance"],
+        "width": settings["width"],
+        "height": settings["height"]
+    }
+    return requests.post(f"{IMAGE_SERVICE}/generate", json=payload, timeout=3600).json()
 
 # =========================
-# MAIN INPUT
+# SIDEBAR
 # =========================
 
-prompt = st.chat_input("Type your prompt...")
+st.sidebar.title("⚙️ Settings")
+
+if health():
+    st.sidebar.success("🟢 Image Service Online")
+else:
+    st.sidebar.error("🔴 Image Service Offline")
+
+model = st.sidebar.selectbox("Model", ["juggernaut", "realvis", "dreamshaper"])
+
+mode = st.sidebar.selectbox("Quality", ["Fast", "Balanced", "Ultra"])
+
+if mode == "Fast":
+    steps, guidance, size = 10, 5.0, 512
+elif mode == "Balanced":
+    steps, guidance, size = 25, 6.5, 768
+else:
+    steps, guidance, size = 40, 8.5, 1024
+
+settings = {
+    "model": model,
+    "steps": steps,
+    "guidance": guidance,
+    "width": size,
+    "height": size
+}
+
+# =========================
+# MAIN CHAT UI
+# =========================
+
+st.title("💬 AI Workstation")
+
+# Display chat
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        if msg["type"] == "text":
+            st.markdown(msg["content"])
+        elif msg["type"] == "image":
+            st.image(msg["content"])
+
+# =========================
+# INPUT
+# =========================
+
+uploaded = st.file_uploader("📎 Upload Image (optional)", type=["png", "jpg"], label_visibility="collapsed")
+
+prompt = st.chat_input("Ask or generate something...")
 
 if prompt:
-    st.chat_message("user").write(prompt)
 
-    if mode == "Chat":
+    # Save user message
+    st.session_state.messages.append({
+        "role": "user",
+        "type": "text",
+        "content": prompt
+    })
 
-        container = st.chat_message("assistant")
-        placeholder = container.empty()
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-        full = ""
-        for token in chat_stream(prompt):
-            full += token
-            placeholder.markdown(full)
-
-    elif mode == "Text → Image":
+    with st.chat_message("assistant"):
 
         progress_bar = st.progress(0)
-        progress_text = st.empty()
+        status = st.empty()
 
-        result = txt2img(prompt)
+        # =========================
+        # IMAGE REQUEST
+        # =========================
+        if is_image_request(prompt):
 
-        while True:
-            prog = get_progress()
+            result = generate_image(prompt, settings)
 
-            if prog["running"]:
-                pct = (prog["current"] + 1) / prog["total"]
-                progress_bar.progress(min(pct, 1.0))
-                progress_text.markdown(
-                    f"**{int(pct*100)}%** ({prog['current']+1}/{prog['total']})"
-                )
-            else:
-                break
-
-        if result.get("error"):
-            st.error(result["error"])
-        else:
-            for url in result["image_urls"]:
-                st.image(url)
-
-    elif mode == "Image → Image":
-
-        if not uploaded_file:
-            st.warning("Upload an image first")
-        else:
-            progress_bar = st.progress(0)
-            progress_text = st.empty()
-
-            result = img2img(prompt, uploaded_file)
-
+            # progress tracking
             while True:
-                prog = get_progress()
-
-                if prog["running"]:
-                    pct = (prog["current"] + 1) / prog["total"]
-                    progress_bar.progress(min(pct, 1.0))
-                    progress_text.markdown(
-                        f"**{int(pct*100)}%** ({prog['current']+1}/{prog['total']})"
-                    )
+                p = get_progress()
+                if p["running"]:
+                    percent = int((p["current"] / max(p["total"], 1)) * 100)
+                    progress_bar.progress(percent)
+                    status.text(f"Generating image... {percent}%")
+                    time.sleep(0.3)
                 else:
                     break
 
@@ -198,3 +138,43 @@ if prompt:
             else:
                 for url in result["image_urls"]:
                     st.image(url)
+
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "type": "image",
+                        "content": url
+                    })
+
+        # =========================
+        # TEXT RESPONSE (LLM placeholder)
+        # =========================
+        else:
+            response = f"🧠 You said:\n\n{prompt}\n\n(LLM integration next step)"
+
+            st.markdown(response)
+
+            st.session_state.messages.append({
+                "role": "assistant",
+                "type": "text",
+                "content": response
+            })
+
+# =========================
+# FOOTER GALLERY
+# =========================
+
+st.divider()
+st.subheader("🖼️ Recent Images")
+
+from pathlib import Path
+
+IMG_DIR = Path("generated_images")
+
+if IMG_DIR.exists():
+    imgs = list(IMG_DIR.glob("*.png"))[-8:]
+
+    cols = st.columns(4)
+
+    for i, img in enumerate(imgs):
+        with cols[i % 4]:
+            st.image(str(img))

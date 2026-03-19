@@ -1,28 +1,30 @@
+import os
+os.environ["HF_HUB_OFFLINE"] = "1"
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pathlib import Path
 from diffusers import StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline
 import torch
-from PIL import Image
-import base64
-from io import BytesIO
+
+# =========================
+# PATHS
+# =========================
 
 BASE = Path(__file__).parent.parent
+OUT = BASE / "generated_images"
+OUT.mkdir(exist_ok=True)
 
 MODEL_PATHS = {
     "dreamshaper": BASE / "models/dreamshaper/dreamshaperXL_lightningDPMSDE.safetensors",
     "juggernaut": BASE / "models/juggernaut/JuggernautXL_v9.safetensors",
-    "realvis": BASE / "models/realvis/RealVisXL_V5.safetensors",
-    "flux": BASE / "models/flux/flux2DevFp8Scaled_fp8Scaled.safetensors",
+    "realvis": BASE / "models/realvis/RealVisXL_V5.safetensors"
 }
-
-OUT = BASE / "generated_images"
-OUT.mkdir(exist_ok=True)
 
 pipe_txt2img = None
 pipe_img2img = None
-current_model_name = None
+current_model = None
 
 progress_state = {
     "current": 0,
@@ -31,28 +33,16 @@ progress_state = {
 }
 
 # =========================
-# REQUEST MODELS
+# REQUEST MODEL
 # =========================
 
-class Txt2ImgReq(BaseModel):
+class Req(BaseModel):
     prompt: str
-    width: int = 512
-    height: int = 512
-    steps: int = 8
-    guidance_scale: float = 5
-    count: int = 1
-    model: str = "dreamshaper"
-
-
-class Img2ImgReq(BaseModel):
-    prompt: str
-    image: str
-    strength: float = 0.6
-    steps: int = 8
-    guidance_scale: float = 5
-    count: int = 1
-    model: str = "dreamshaper"
-
+    model: str = "juggernaut"
+    steps: int = 30
+    guidance_scale: float = 6.5
+    width: int = 1024
+    height: int = 1024
 
 # =========================
 # APP INIT
@@ -61,42 +51,34 @@ class Img2ImgReq(BaseModel):
 app = FastAPI()
 app.mount("/images", StaticFiles(directory=str(OUT)), name="images")
 
-
-@app.on_event("startup")
-def start():
-    print("✅ Image service ready (lazy loading enabled)")
-
-
 # =========================
-# MODEL LOADING
+# LOAD MODEL
 # =========================
 
-def load_model(model_name):
-    global pipe_txt2img, pipe_img2img, current_model_name
+def load_model(name):
+    global pipe_txt2img, pipe_img2img, current_model
 
-    if current_model_name == model_name:
+    if current_model == name:
         return
 
-    print(f"🔄 Loading model: {model_name}")
+    path = MODEL_PATHS.get(name)
 
-    model_path = MODEL_PATHS[model_name]
+    if not path or not path.exists():
+        raise RuntimeError(f"Model not found: {name}")
+
+    print(f"🔄 Loading model: {name}")
 
     pipe_txt2img = StableDiffusionXLPipeline.from_single_file(
-        str(model_path),
+        str(path),
         torch_dtype=torch.float32
-    )
-    pipe_txt2img.to("cpu")
+    ).to("cpu")
 
     pipe_img2img = StableDiffusionXLImg2ImgPipeline.from_single_file(
-        str(model_path),
+        str(path),
         torch_dtype=torch.float32
-    )
-    pipe_img2img.to("cpu")
+    ).to("cpu")
 
-    current_model_name = model_name
-
-    print(f"✅ Model loaded: {model_name}")
-
+    current_model = name
 
 # =========================
 # HEALTH + PROGRESS
@@ -106,100 +88,77 @@ def load_model(model_name):
 def health():
     return {"status": "ok"}
 
-
 @app.get("/progress")
 def progress():
     return progress_state
 
-
 # =========================
-# TEXT → IMAGE
+# GENERATION
 # =========================
 
 @app.post("/generate")
-def generate(r: Txt2ImgReq):
+def generate(r: Req):
     global progress_state
 
     try:
         load_model(r.model)
 
-        progress_state["running"] = True
-        progress_state["current"] = 0
-        progress_state["total"] = r.steps
+        NEG = "blurry, bad anatomy, low quality, distorted, watermark, artifacts"
 
-        def callback(pipe, step, timestep, kwargs):
+        # SAFE SIZE (CPU optimized)
+        width = min(r.width, 1024)
+        height = min(r.height, 1024)
+
+        progress_state.update({
+            "current": 0,
+            "total": r.steps,
+            "running": True
+        })
+
+        def cb(pipe, step, timestep, kwargs):
             progress_state["current"] = step
-            return kwargs  # ✅ CRITICAL FIX
+            return kwargs if kwargs else {}
 
+        # =========================
+        # STAGE 1 (BASE GENERATION)
+        # =========================
         res = pipe_txt2img(
             prompt=r.prompt,
-            width=r.width,
-            height=r.height,
+            negative_prompt=NEG,
+            width=width,
+            height=height,
             num_inference_steps=r.steps,
             guidance_scale=r.guidance_scale,
-            num_images_per_prompt=r.count,
-            callback_on_step_end=callback
+            callback_on_step_end=cb
         )
 
-        paths = []
-        for img in res.images:
-            p = OUT / f"img_{len(list(OUT.glob('*')))}.png"
-            img.save(p)
-            paths.append(p)
+        img = res.images[0]
 
-        progress_state["running"] = False
-
-        urls = [f"http://127.0.0.1:8502/images/{p.name}" for p in paths]
-        return {"image_urls": urls}
-
-    except Exception as e:
-        progress_state["running"] = False
-        return {"error": str(e)}
-
-
-# =========================
-# IMAGE → IMAGE
-# =========================
-
-@app.post("/img2img")
-def img2img(r: Img2ImgReq):
-    global progress_state
-
-    try:
-        load_model(r.model)
-
-        progress_state["running"] = True
-        progress_state["current"] = 0
-        progress_state["total"] = r.steps
-
-        image_bytes = base64.b64decode(r.image)
-        init_image = Image.open(BytesIO(image_bytes)).convert("RGB")
-        init_image = init_image.resize((512, 512))
-
-        def callback(pipe, step, timestep, kwargs):
-            progress_state["current"] = step
-            return kwargs  # ✅ CRITICAL FIX
-
-        res = pipe_img2img(
+        # =========================
+        # STAGE 2 (REFINE)
+        # =========================
+        res2 = pipe_img2img(
             prompt=r.prompt,
-            image=init_image,
-            strength=r.strength,
-            num_inference_steps=r.steps,
-            guidance_scale=r.guidance_scale,
-            num_images_per_prompt=r.count,
-            callback_on_step_end=callback
+            negative_prompt=NEG,
+            image=img,
+            strength=0.3,
+            num_inference_steps=20,
+            guidance_scale=r.guidance_scale
         )
 
-        paths = []
-        for img in res.images:
-            p = OUT / f"img_{len(list(OUT.glob('*')))}.png"
-            img.save(p)
-            paths.append(p)
+        img = res2.images[0]
+
+        # =========================
+        # SAVE
+        # =========================
+        p = OUT / f"img_{len(list(OUT.glob('*')))}.png"
+        img.save(p)
 
         progress_state["running"] = False
 
-        urls = [f"http://127.0.0.1:8502/images/{p.name}" for p in paths]
-        return {"image_urls": urls}
+        return {
+            "image_urls": [f"http://127.0.0.1:8502/images/{p.name}"]
+        }
 
     except Exception as e:
         progress_state["running"] = False
