@@ -27,10 +27,8 @@ llm_model = st.sidebar.selectbox(
 
 image_model = st.sidebar.selectbox(
     "🎨 Image Model",
-    ["dreamshaper", "juggernaut", "realvis"]
+    ["dreamshaper", "juggernaut", "realvis", "flux"]
 )
-
-st.sidebar.markdown("### 🎯 Quality")
 
 steps = st.sidebar.slider("Steps", 1, 60, 25)
 guidance = st.sidebar.slider("Guidance", 1.0, 15.0, 7.0)
@@ -40,12 +38,12 @@ count = st.sidebar.slider("Images", 1, 8, 1)
 strength = st.sidebar.slider("Img2Img Strength", 0.1, 1.0, 0.6)
 
 # =========================
-# HEALTH CHECK
+# HEALTH
 # =========================
 
 def check_health():
     try:
-        return requests.get(f"{IMAGE_SERVICE}/health", timeout=1).status_code == 200
+        return requests.get(f"{IMAGE_SERVICE}/health").status_code == 200
     except:
         return False
 
@@ -59,27 +57,15 @@ else:
 # =========================
 
 def chat_stream(prompt):
-    try:
-        with requests.post(
-            OLLAMA_URL,
-            json={
-                "model": llm_model,
-                "prompt": prompt,
-                "stream": True
-            },
-            stream=True,
-            timeout=300
-        ) as response:
-
-            for line in response.iter_lines():
-                if line:
-                    try:
-                        data = json.loads(line.decode())
-                        yield data.get("response", "")
-                    except:
-                        continue
-    except Exception as e:
-        yield f"Error: {str(e)}"
+    with requests.post(
+        OLLAMA_URL,
+        json={"model": llm_model, "prompt": prompt, "stream": True},
+        stream=True
+    ) as response:
+        for line in response.iter_lines():
+            if line:
+                data = json.loads(line.decode())
+                yield data.get("response", "")
 
 # =========================
 # IMAGE CALLS
@@ -96,8 +82,7 @@ def txt2img(prompt):
             "guidance_scale": guidance,
             "count": count,
             "model": image_model
-        },
-        timeout=3600
+        }
     ).json()
 
 def img2img(prompt, file):
@@ -114,8 +99,7 @@ def img2img(prompt, file):
             "guidance_scale": guidance,
             "count": count,
             "model": image_model
-        },
-        timeout=3600
+        }
     ).json()
 
 # =========================
@@ -124,26 +108,24 @@ def img2img(prompt, file):
 
 def get_progress():
     try:
-        return requests.get(f"{IMAGE_SERVICE}/progress", timeout=1).json()
+        return requests.get(f"{IMAGE_SERVICE}/progress").json()
     except:
         return {"current": 0, "total": 1, "running": False}
 
 # =========================
-# IMAGE UPLOAD (ONLY IN IMG2IMG)
+# IMAGE UPLOAD
 # =========================
 
 uploaded_file = None
 
 if mode == "Image → Image":
-    st.markdown("### 📤 Upload Image")
-
     uploaded_file = st.file_uploader(
-        "Drag & drop or click to upload",
+        "📤 Upload image",
         type=["png", "jpg", "jpeg"]
     )
 
     if uploaded_file:
-        st.image(uploaded_file, caption="Input Image", use_container_width=True)
+        st.image(uploaded_file, use_container_width=True)
 
 # =========================
 # MAIN INPUT
@@ -154,7 +136,6 @@ prompt = st.chat_input("Type your prompt...")
 if prompt:
     st.chat_message("user").write(prompt)
 
-    # ================= CHAT =================
     if mode == "Chat":
 
         container = st.chat_message("assistant")
@@ -165,7 +146,6 @@ if prompt:
             full += token
             placeholder.markdown(full)
 
-    # ================= TEXT → IMAGE =================
     elif mode == "Text → Image":
 
         progress_bar = st.progress(0)
@@ -175,11 +155,12 @@ if prompt:
 
         while True:
             prog = get_progress()
+
             if prog["running"]:
-                pct = prog["current"] / prog["total"]
-                progress_bar.progress(pct)
+                pct = (prog["current"] + 1) / prog["total"]
+                progress_bar.progress(min(pct, 1.0))
                 progress_text.markdown(
-                    f"**{int(pct*100)}%** ({prog['current']}/{prog['total']})"
+                    f"**{int(pct*100)}%** ({prog['current']+1}/{prog['total']})"
                 )
             else:
                 break
@@ -190,11 +171,10 @@ if prompt:
             for url in result["image_urls"]:
                 st.image(url)
 
-    # ================= IMAGE → IMAGE =================
     elif mode == "Image → Image":
 
         if not uploaded_file:
-            st.warning("Please upload an image first")
+            st.warning("Upload an image first")
         else:
             progress_bar = st.progress(0)
             progress_text = st.empty()
@@ -203,11 +183,12 @@ if prompt:
 
             while True:
                 prog = get_progress()
+
                 if prog["running"]:
-                    pct = prog["current"] / prog["total"]
-                    progress_bar.progress(pct)
+                    pct = (prog["current"] + 1) / prog["total"]
+                    progress_bar.progress(min(pct, 1.0))
                     progress_text.markdown(
-                        f"**{int(pct*100)}%** ({prog['current']}/{prog['total']})"
+                        f"**{int(pct*100)}%** ({prog['current']+1}/{prog['total']})"
                     )
                 else:
                     break

@@ -7,15 +7,14 @@ import torch
 from PIL import Image
 import base64
 from io import BytesIO
-import threading
-import time
 
 BASE = Path(__file__).parent.parent
 
 MODEL_PATHS = {
     "dreamshaper": BASE / "models/dreamshaper/dreamshaperXL_lightningDPMSDE.safetensors",
     "juggernaut": BASE / "models/juggernaut/JuggernautXL_v9.safetensors",
-    "realvis": BASE / "models/realvis/realvisxlV.safetensors"
+    "realvis": BASE / "models/realvis/RealVisXL_V5.safetensors",
+    "flux": BASE / "models/flux/flux2DevFp8Scaled_fp8Scaled.safetensors",
 }
 
 OUT = BASE / "generated_images"
@@ -25,7 +24,11 @@ pipe_txt2img = None
 pipe_img2img = None
 current_model_name = None
 
-progress_state = {"current": 0, "total": 1, "running": False}
+progress_state = {
+    "current": 0,
+    "total": 1,
+    "running": False
+}
 
 # =========================
 # REQUEST MODELS
@@ -50,6 +53,7 @@ class Img2ImgReq(BaseModel):
     count: int = 1
     model: str = "dreamshaper"
 
+
 # =========================
 # APP INIT
 # =========================
@@ -57,9 +61,11 @@ class Img2ImgReq(BaseModel):
 app = FastAPI()
 app.mount("/images", StaticFiles(directory=str(OUT)), name="images")
 
+
 @app.on_event("startup")
 def start():
-    print("Image service ready (lazy loading enabled)")
+    print("✅ Image service ready (lazy loading enabled)")
+
 
 # =========================
 # MODEL LOADING
@@ -71,22 +77,26 @@ def load_model(model_name):
     if current_model_name == model_name:
         return
 
-    print(f"Loading model: {model_name}")
+    print(f"🔄 Loading model: {model_name}")
 
     model_path = MODEL_PATHS[model_name]
 
     pipe_txt2img = StableDiffusionXLPipeline.from_single_file(
-        str(model_path), torch_dtype=torch.float32
+        str(model_path),
+        torch_dtype=torch.float32
     )
     pipe_txt2img.to("cpu")
 
     pipe_img2img = StableDiffusionXLImg2ImgPipeline.from_single_file(
-        str(model_path), torch_dtype=torch.float32
+        str(model_path),
+        torch_dtype=torch.float32
     )
     pipe_img2img.to("cpu")
 
     current_model_name = model_name
-    print(f"Model loaded: {model_name}")
+
+    print(f"✅ Model loaded: {model_name}")
+
 
 # =========================
 # HEALTH + PROGRESS
@@ -96,24 +106,11 @@ def load_model(model_name):
 def health():
     return {"status": "ok"}
 
+
 @app.get("/progress")
 def progress():
     return progress_state
 
-# =========================
-# PROGRESS SIMULATION
-# =========================
-
-def simulate_progress(steps):
-    global progress_state
-    progress_state["current"] = 0
-    progress_state["total"] = steps
-
-    for i in range(steps):
-        if not progress_state["running"]:
-            break
-        progress_state["current"] = i + 1
-        time.sleep(0.3)
 
 # =========================
 # TEXT → IMAGE
@@ -127,7 +124,12 @@ def generate(r: Txt2ImgReq):
         load_model(r.model)
 
         progress_state["running"] = True
-        threading.Thread(target=simulate_progress, args=(r.steps,), daemon=True).start()
+        progress_state["current"] = 0
+        progress_state["total"] = r.steps
+
+        def callback(pipe, step, timestep, kwargs):
+            progress_state["current"] = step
+            return kwargs  # ✅ CRITICAL FIX
 
         res = pipe_txt2img(
             prompt=r.prompt,
@@ -136,6 +138,7 @@ def generate(r: Txt2ImgReq):
             num_inference_steps=r.steps,
             guidance_scale=r.guidance_scale,
             num_images_per_prompt=r.count,
+            callback_on_step_end=callback
         )
 
         paths = []
@@ -153,6 +156,7 @@ def generate(r: Txt2ImgReq):
         progress_state["running"] = False
         return {"error": str(e)}
 
+
 # =========================
 # IMAGE → IMAGE
 # =========================
@@ -165,11 +169,16 @@ def img2img(r: Img2ImgReq):
         load_model(r.model)
 
         progress_state["running"] = True
-        threading.Thread(target=simulate_progress, args=(r.steps,), daemon=True).start()
+        progress_state["current"] = 0
+        progress_state["total"] = r.steps
 
         image_bytes = base64.b64decode(r.image)
         init_image = Image.open(BytesIO(image_bytes)).convert("RGB")
         init_image = init_image.resize((512, 512))
+
+        def callback(pipe, step, timestep, kwargs):
+            progress_state["current"] = step
+            return kwargs  # ✅ CRITICAL FIX
 
         res = pipe_img2img(
             prompt=r.prompt,
@@ -178,6 +187,7 @@ def img2img(r: Img2ImgReq):
             num_inference_steps=r.steps,
             guidance_scale=r.guidance_scale,
             num_images_per_prompt=r.count,
+            callback_on_step_end=callback
         )
 
         paths = []
